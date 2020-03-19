@@ -802,7 +802,7 @@ drawvec impose_tile_boundaries(drawvec &geom, long long extent) {
 	return out;
 }
 
-drawvec simplify_lines(drawvec &geom, int z, int detail, bool mark_tile_bounds, double simplification, size_t retain) {
+drawvec simplify_lines(drawvec &geom, int z, int detail, bool mark_tile_bounds, double simplification, size_t retain, drawvec const &shared_nodes) {
 	int res = 1 << (32 - detail - z);
 	long long area = 1LL << (32 - z);
 
@@ -813,6 +813,13 @@ drawvec simplify_lines(drawvec &geom, int z, int detail, bool mark_tile_bounds, 
 			geom[i].necessary = 0;
 		} else {
 			geom[i].necessary = 1;
+		}
+
+		if (prevent[P_SIMPLIFY_SHARED_NODES]) {
+			auto pt = std::lower_bound(shared_nodes.begin(), shared_nodes.end(), geom[i]);
+			if (pt != shared_nodes.end() && *pt == geom[i]) {
+				geom[i].necessary = true;
+			}
 		}
 	}
 
@@ -874,8 +881,8 @@ drawvec reorder_lines(drawvec &geom) {
 	// instead of down and to the right
 	// so that it will coalesce better
 
-	unsigned long long l1 = encode(geom[0].x, geom[0].y);
-	unsigned long long l2 = encode(geom[geom.size() - 1].x, geom[geom.size() - 1].y);
+	unsigned long long l1 = encode_index(geom[0].x, geom[0].y);
+	unsigned long long l2 = encode_index(geom[geom.size() - 1].x, geom[geom.size() - 1].y);
 
 	if (l1 > l2) {
 		drawvec out;
@@ -1142,7 +1149,7 @@ drawvec stairstep(drawvec &geom, int z, int detail) {
 	for (size_t i = 0; i < geom.size(); i++) {
 		if (geom[i].op == VT_MOVETO) {
 			out.push_back(geom[i]);
-		} else {
+		} else if (out.size() > 0) {
 			long long x0 = out[out.size() - 1].x;
 			long long y0 = out[out.size() - 1].y;
 			long long x1 = geom[i].x;
@@ -1202,6 +1209,9 @@ drawvec stairstep(drawvec &geom, int z, int detail) {
 			}
 
 			// out.push_back(draw(VT_LINETO, xx, yy));
+		} else {
+			fprintf(stderr, "Can't happen: stairstepping lineto with no moveto\n");
+			exit(EXIT_FAILURE);
 		}
 	}
 

@@ -21,6 +21,11 @@
 #include "evaluator.hpp"
 #include "milo/dtoa_milo.h"
 
+// Offset coordinates to keep them positive
+#define COORD_OFFSET (4LL << 32)
+#define SHIFT_RIGHT(a) ((((a) + COORD_OFFSET) >> geometry_scale) - (COORD_OFFSET >> geometry_scale))
+#define SHIFT_LEFT(a) ((((a) + (COORD_OFFSET >> geometry_scale)) << geometry_scale) - COORD_OFFSET)
+
 size_t fwrite_check(const void *ptr, size_t size, size_t nitems, FILE *stream, const char *fname) {
 	size_t w = fwrite(ptr, size, nitems, stream);
 	if (w != nitems) {
@@ -355,12 +360,12 @@ static long long scale_geometry(struct serialization_state *sst, long long *bbox
 			}
 
 			if (!*(sst->initialized)) {
-				if (x < 0 || x >= (1LL << 32) || y < 0 || y >= (1LL < 32)) {
+				if (x < 0 || x >= (1LL << 32) || y < 0 || y >= (1LL << 32)) {
 					*(sst->initial_x) = 1LL << 31;
 					*(sst->initial_y) = 1LL << 31;
 				} else {
-					*(sst->initial_x) = (x >> geometry_scale) << geometry_scale;
-					*(sst->initial_y) = (y >> geometry_scale) << geometry_scale;
+					*(sst->initial_x) = (((x + COORD_OFFSET) >> geometry_scale) << geometry_scale) - COORD_OFFSET;
+					*(sst->initial_y) = (((y + COORD_OFFSET) >> geometry_scale) << geometry_scale) - COORD_OFFSET;
 				}
 
 				*(sst->initialized) = 1;
@@ -374,8 +379,8 @@ static long long scale_geometry(struct serialization_state *sst, long long *bbox
 				geom[i].x = std::round(x * scale);
 				geom[i].y = std::round(y * scale);
 			} else {
-				geom[i].x = x >> geometry_scale;
-				geom[i].y = y >> geometry_scale;
+				geom[i].x = SHIFT_RIGHT(x);
+				geom[i].y = SHIFT_RIGHT(y);
 			}
 		}
 	}
@@ -412,12 +417,12 @@ int serialize_feature(struct serialization_state *sst, serial_feature &sf) {
 
 	for (auto &c : clipbboxes) {
 		if (sf.t == VT_POLYGON) {
-			sf.geometry = simple_clip_poly(sf.geometry, c.minx >> geometry_scale, c.miny >> geometry_scale, c.maxx >> geometry_scale, c.maxy >> geometry_scale);
+			sf.geometry = simple_clip_poly(sf.geometry, SHIFT_RIGHT(c.minx), SHIFT_RIGHT(c.miny), SHIFT_RIGHT(c.maxx), SHIFT_RIGHT(c.maxy));
 		} else if (sf.t == VT_LINE) {
-			sf.geometry = clip_lines(sf.geometry, c.minx >> geometry_scale, c.miny >> geometry_scale, c.maxx >> geometry_scale, c.maxy >> geometry_scale);
+			sf.geometry = clip_lines(sf.geometry, SHIFT_RIGHT(c.minx), SHIFT_RIGHT(c.miny), SHIFT_RIGHT(c.maxx), SHIFT_RIGHT(c.maxy));
 			sf.geometry = remove_noop(sf.geometry, sf.t, 0);
 		} else if (sf.t == VT_POINT) {
-			sf.geometry = clip_point(sf.geometry, c.minx >> geometry_scale, c.miny >> geometry_scale, c.maxx >> geometry_scale, c.maxy >> geometry_scale);
+			sf.geometry = clip_point(sf.geometry, SHIFT_RIGHT(c.minx), SHIFT_RIGHT(c.miny), SHIFT_RIGHT(c.maxx), SHIFT_RIGHT(c.maxy));
 		}
 
 		sf.bbox[0] = LLONG_MAX;
@@ -426,8 +431,8 @@ int serialize_feature(struct serialization_state *sst, serial_feature &sf) {
 		sf.bbox[3] = LLONG_MIN;
 
 		for (auto &g : sf.geometry) {
-			long long x = g.x << geometry_scale;
-			long long y = g.y << geometry_scale;
+			long long x = SHIFT_LEFT(g.x);
+			long long y = SHIFT_LEFT(g.y);
 
 			if (x < sf.bbox[0]) {
 				sf.bbox[0] = x;
@@ -460,7 +465,7 @@ int serialize_feature(struct serialization_state *sst, serial_feature &sf) {
 		std::vector<unsigned long long> locs;
 		for (size_t i = 0; i < sf.geometry.size(); i++) {
 			if (sf.geometry[i].op == VT_MOVETO || sf.geometry[i].op == VT_LINETO) {
-				locs.push_back(encode(sf.geometry[i].x << geometry_scale, sf.geometry[i].y << geometry_scale));
+				locs.push_back(encode_index(SHIFT_LEFT(sf.geometry[i].x), SHIFT_LEFT(sf.geometry[i].y)));
 			}
 		}
 		std::sort(locs.begin(), locs.end());
@@ -552,7 +557,7 @@ int serialize_feature(struct serialization_state *sst, serial_feature &sf) {
 	// and then mask to bring it back into the addressable area
 	long long midx = (sf.bbox[0] / 2 + sf.bbox[2] / 2) & ((1LL << 32) - 1);
 	long long midy = (sf.bbox[1] / 2 + sf.bbox[3] / 2) & ((1LL << 32) - 1);
-	bbox_index = encode(midx, midy);
+	bbox_index = encode_index(midx, midy);
 
 	if (additional[A_DROP_DENSEST_AS_NEEDED] || additional[A_COALESCE_DENSEST_AS_NEEDED] || additional[A_CLUSTER_DENSEST_AS_NEEDED] || additional[A_CALCULATE_FEATURE_DENSITY] || additional[A_INCREASE_GAMMA_AS_NEEDED] || sst->uses_gamma || cluster_distance != 0) {
 		sf.index = bbox_index;
@@ -583,18 +588,6 @@ int serialize_feature(struct serialization_state *sst, serial_feature &sf) {
 	}
 
 	for (ssize_t i = (ssize_t) sf.full_keys.size() - 1; i >= 0; i--) {
-		if (sst->exclude_all) {
-			if (sst->include->count(sf.full_keys[i]) == 0) {
-				sf.full_keys.erase(sf.full_keys.begin() + i);
-				sf.full_values.erase(sf.full_values.begin() + i);
-				continue;
-			}
-		} else if (sst->exclude->count(sf.full_keys[i]) != 0) {
-			sf.full_keys.erase(sf.full_keys.begin() + i);
-			sf.full_values.erase(sf.full_values.begin() + i);
-			continue;
-		}
-
 		coerce_value(sf.full_keys[i], sf.full_values[i].type, sf.full_values[i].s, sst->attribute_types);
 
 		if (sf.full_keys[i] == attribute_for_id) {
@@ -634,6 +627,17 @@ int serialize_feature(struct serialization_state *sst, serial_feature &sf) {
 			}
 		}
 
+		if (sst->exclude_all) {
+			if (sst->include->count(sf.full_keys[i]) == 0) {
+				sf.full_keys.erase(sf.full_keys.begin() + i);
+				sf.full_values.erase(sf.full_values.begin() + i);
+				continue;
+			}
+		} else if (sst->exclude->count(sf.full_keys[i]) != 0) {
+			sf.full_keys.erase(sf.full_keys.begin() + i);
+			sf.full_values.erase(sf.full_values.begin() + i);
+			continue;
+		}
 	}
 
 	if (!sst->filters) {
@@ -663,7 +667,7 @@ int serialize_feature(struct serialization_state *sst, serial_feature &sf) {
 	}
 
 	long long geomstart = r->geompos;
-	serialize_feature(r->geomfile, &sf, &r->geompos, sst->fname, *(sst->initial_x) >> geometry_scale, *(sst->initial_y) >> geometry_scale, false);
+	serialize_feature(r->geomfile, &sf, &r->geompos, sst->fname, SHIFT_RIGHT(*(sst->initial_x)), SHIFT_RIGHT(*(sst->initial_y)), false);
 
 	struct index index;
 	index.start = geomstart;
